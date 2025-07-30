@@ -1,48 +1,80 @@
-import formidable from 'formidable';
-import fs from 'fs';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+// api/analyze.js
 
 export const config = {
   api: {
-    bodyParser: false, // Required for formidable
+    bodyParser: false,
   },
 };
 
+import formidable from 'formidable';
+import fs from 'fs';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 export default async function handler(req, res) {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    return res.status(200).end();
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', '*'); // Allow all domains (or specify one)
+
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(405).json({ status: 'fail', message: 'Only POST allowed' });
   }
 
   const form = new formidable.IncomingForm();
 
   form.parse(req, async (err, fields, files) => {
-    if (err) return res.status(500).json({ error: 'Error parsing the file' });
+    if (err) {
+      return res.status(500).json({ status: 'fail', message: 'Failed to parse form' });
+    }
 
-    const imageFile = files.image;
-    if (!imageFile) return res.status(400).json({ error: 'No image uploaded' });
+    const file = files.image;
+
+    if (!file) {
+      return res.status(400).json({ status: 'fail', message: 'No image uploaded' });
+    }
+
+    const imageBuffer = fs.readFileSync(file[0].filepath);
+    const imageBase64 = imageBuffer.toString('base64');
 
     try {
-      const base64Image = fs.readFileSync(imageFile[0].filepath, { encoding: 'base64' });
-
-      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      const model = genAI.getGenerativeModel({ model: "gemini-pro-vision" });
+      const model = genAI.getGenerativeModel({ model: 'gemini-pro-vision' });
 
       const result = await model.generateContent({
         contents: [{
           parts: [
-            { inlineData: { mimeType: "image/jpeg", data: base64Image } },
-            { text: "List all food items in the image and estimate for each: food item name, weight in grams, calories, proteins, carbs, fats. Return response in JSON format array." }
-          ]
-        }]
+            {
+              inlineData: {
+                data: imageBase64,
+                mimeType: 'image/jpeg',
+              },
+            },
+            {
+              text: 'List all food items in the image with estimated nutrition in this JSON format: [{food_item, quantity, weight, calories, proteins, carbohydrates, fats}]',
+            },
+          ],
+          role: 'user',
+        }],
       });
 
       const response = await result.response;
-      const text = response.text();
+      const text = await response.text();
 
-      res.status(200).json({ status: 'success', result: JSON.parse(text) });
+      // Try to extract JSON from Gemini response
+      const jsonMatch = text.match(/\[.*\]/s);
+      if (!jsonMatch) throw new Error("Gemini didn't return JSON");
 
-    } catch (e) {
-      res.status(500).json({ status: 'error', message: e.message });
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      res.status(200).json({ status: 'success', result: parsed });
+    } catch (error) {
+      res.status(500).json({ status: 'fail', message: error.message });
     }
   });
 }
